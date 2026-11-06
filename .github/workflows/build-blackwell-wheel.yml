@@ -1,0 +1,131 @@
+name: Build Blackwell sm_120 Wheel
+
+on:
+  workflow_dispatch:
+    inputs:
+      llama_version:
+        description: "llama-cpp-python git tag / release version"
+        required: true
+        default: "v0.3.36"
+      cuda_version:
+        description: "NVIDIA CUDA Toolkit version (requires 12.8+ for sm_120)"
+        required: true
+        default: "12.8.0"
+      cuda_architectures:
+        description: "Target GPU Compute Capabilities (semicolon-separated)"
+        required: true
+        default: "80;86;89;90;120"
+      python_version:
+        description: "Target Python runtime version"
+        required: true
+        default: "3.12"
+      hf_target_repo:
+        description: "Hugging Face Space/Dataset to auto-upload wheel (Optional, e.g. N4YuC4/docneedle)"
+        required: false
+        default: "N4YuC4/docneedle"
+      create_release:
+        description: "Publish wheel directly to a GitHub Release"
+        type: boolean
+        required: true
+        default: true
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    name: Build CUDA Wheel (Python ${{ inputs.python_version }} - CUDA ${{ inputs.cuda_version }})
+    runs-on: ubuntu-24.04
+
+    steps:
+      - name: Free Disk Space on Runner
+        run: |
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /usr/local/share/boost
+          sudo apt-get clean
+          df -h
+
+      - name: Set up Python ${{ inputs.python_version }}
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ inputs.python_version }}
+
+      - name: Install CUDA Toolkit ${{ inputs.cuda_version }}
+        uses: Jimver/cuda-toolkit@v0.2.36
+        with:
+          cuda: ${{ inputs.cuda_version }}
+          method: "network"
+
+      - name: Verify nvcc and CUDA Environment
+        run: |
+          nvcc --version
+          which nvcc
+          echo "CUDA_PATH: $CUDA_PATH"
+
+      - name: Install Python Packaging Tools
+        run: |
+          python -m pip install --upgrade pip
+          pip install build wheel setuptools scikit-build-core ninja huggingface_hub
+
+      - name: Clone llama-cpp-python (${{ inputs.llama_version }})
+        run: |
+          git clone --recurse-submodules --depth 1 --branch ${{ inputs.llama_version }} https://github.com/abetlen/llama-cpp-python.git llama-cpp-src
+
+      - name: Build Wheel with Blackwell sm_120 Support
+        working-directory: llama-cpp-src
+        env:
+          CMAKE_ARGS: "-DGGML_CUDA=on -DCMAKE_CUDA_ARCHITECTURES=${{ inputs.cuda_architectures }}"
+          FORCE_CMAKE: "1"
+        run: |
+          echo "==> Starting build with CMAKE_ARGS=$CMAKE_ARGS"
+          python -m build --wheel
+          echo "==> Build finished. Listing wheel output:"
+          ls -lh dist/
+
+      - name: Upload Wheel Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: llama_cpp_python-${{ inputs.llama_version }}-sm120-cp${{ inputs.python_version }}
+          path: llama-cpp-src/dist/*.whl
+
+      - name: Create GitHub Release with Wheel Asset
+        if: ${{ inputs.create_release }}
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: wheel-${{ inputs.llama_version }}-sm120
+          name: "llama-cpp-python ${{ inputs.llama_version }} (CUDA ${{ inputs.cuda_version }} - sm_120)"
+          body: |
+            Automated Linux x86_64 prebuilt wheel for `llama-cpp-python` (${{ inputs.llama_version }}).
+            - **CUDA Version:** ${{ inputs.cuda_version }}
+            - **Python Version:** ${{ inputs.python_version }}
+            - **Target GPU Architectures:** `${{ inputs.cuda_architectures }}` (includes sm_120 Blackwell, sm_90 Hopper, sm_89 Ada Lovelace, sm_86 Ampere, sm_80 A100)
+          files: llama-cpp-src/dist/*.whl
+          draft: false
+          prerelease: false
+
+      - name: Upload Directly to Hugging Face Space (If HF_TOKEN provided)
+        if: ${{ env.HF_TOKEN != '' && inputs.hf_target_repo != '' }}
+        env:
+          HF_TOKEN: ${{ secrets.HF_TOKEN }}
+          HF_TARGET_REPO: ${{ inputs.hf_target_repo }}
+        run: |
+          python3 -c "
+          import os, glob
+          from huggingface_hub import HfApi
+          token = os.environ.get('HF_TOKEN')
+          repo = os.environ.get('HF_TARGET_REPO')
+          api = HfApi(token=token)
+          wheels = glob.glob('llama-cpp-src/dist/*.whl')
+          for w in wheels:
+              fname = os.path.basename(w)
+              print(f'==> Uploading {fname} to Hugging Face Space: {repo} (path: wheels/{fname})...')
+              try:
+                  api.upload_file(
+                      path_or_fileobj=w,
+                      path_in_repo=f'wheels/{fname}',
+                      repo_id=repo,
+                      repo_type='space'
+                  )
+                  print('==> Success! Uploaded directly to Hugging Face Space.')
+              except Exception as e:
+                  print(f'==> Upload failed: {e}')
+          "
