@@ -35,7 +35,7 @@ permissions:
 jobs:
   build:
     name: Build CUDA Wheel (Python ${{ inputs.python_version }} - CUDA ${{ inputs.cuda_version }})
-    runs-on: ubuntu-24.04
+    runs-on: ubuntu-22.04
 
     steps:
       - name: Free Disk Space on Runner
@@ -129,3 +129,4 @@ jobs:
               except Exception as e:
                   print(f'==> Upload failed: {e}')
           "
+
